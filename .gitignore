@@ -3,6 +3,7 @@ node_modules/
 dist/
 .npm-cache/
 .local/mariadb/
+.local/mariadb
 .local/mariadb-*/
 .local/mysqldata/
 .local/*.log

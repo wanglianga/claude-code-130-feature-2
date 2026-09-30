@@ -20,6 +20,9 @@ export default function OverviewPage() {
         <div className="stat"><div className="n" style={{ color: 'var(--ok)' }}>¥{Number(d.paid_total).toFixed(0)}</div><div className="l">已收净额（扣退款）</div></div>
         <div className="stat"><div className="n" style={{ color: d.expiring_lockers ? 'var(--warn)' : undefined }}>{d.expiring_lockers}</div><div className="l">柜位临期/过期</div></div>
         <div className="stat"><div className="n" style={{ color: d.failed_mementos ? 'var(--bad)' : undefined }}>{d.failed_mementos}</div><div className="l">纪念品失败/重做中</div></div>
+        <div className="stat"><div className="n" style={{ color: d.open_failure_cases ? 'var(--warn)' : 'var(--ok)' }}>{d.open_failure_cases || 0}</div><div className="l">失败处理未结案</div></div>
+        <div className="stat"><div className="n" style={{ color: d.failure_review_pending ? 'var(--warn)' : undefined }}>{d.failure_review_pending || 0}</div><div className="l">待制作主管复核</div></div>
+        <div className="stat"><div className="n" style={{ color: (d.memento_rating_avg || 0) < 4 ? 'var(--warn)' : 'var(--ok)' }}>{d.memento_rating_avg == null ? '—' : `${d.memento_rating_avg}★`}</div><div className="l">家属失败处理评分（{d.memento_rating_count || 0}）</div></div>
         <div className="stat"><div className="n" style={{ color: d.pending_fees ? 'var(--warn)' : undefined }}>{d.pending_fees}</div><div className="l">待家属确认费用变更</div></div>
         <div className="stat"><div className="n" style={{ color: d.breached_promises.length ? 'var(--bad)' : undefined }}>{d.breached_promises.length}</div><div className="l">承诺时间疑似超期</div></div>
       </div>

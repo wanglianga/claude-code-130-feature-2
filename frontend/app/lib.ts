@@ -40,6 +40,7 @@ export const ROLE_LABEL: Record<string, string> = {
   ceremonialist: '礼仪师',
   cremator: '火化师',
   artisan: '纪念品制作',
+  artisan_supervisor: '纪念品制作主管',
   finance: '财务',
   manager: '管理者',
 };
@@ -86,4 +87,31 @@ export const TRIGGER_LABEL: Record<string, string> = {
   locker_expiring: '柜位临期提醒',
   locker_expired: '到期未续费跟进',
   post_service: '服务后情绪安抚',
+};
+
+export const FAILURE_STATUS_LABEL: Record<string, string> = {
+  open: '待客服拟方案',
+  proposed: '待主人确认方案',
+  owner_rejected: '主人拒绝·待重拟',
+  remake_confirmed: '已确认·重做中',
+  refund_confirmed: '已确认·退款处理中',
+  alternative_confirmed: '已确认·替代制作中',
+  reviewing: '待制作主管复核',
+  reviewed: '主管已复核·待家属评价',
+  closed: '已结案',
+};
+
+export function failureStatusTag(s: string) {
+  const map: Record<string, string> = {
+    open: 'bad', proposed: 'warn', owner_rejected: 'bad',
+    remake_confirmed: 'info', refund_confirmed: 'info', alternative_confirmed: 'info',
+    reviewing: 'warn', reviewed: 'ok', closed: 'ok',
+  };
+  return map[s] || '';
+}
+
+export const RESOLUTION_LABEL: Record<string, string> = {
+  remake: '使用剩余材料重做',
+  refund: '退款（不再制作）',
+  alternative: '替代纪念品',
 };

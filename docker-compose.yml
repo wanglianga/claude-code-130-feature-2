@@ -1,0 +1,55 @@
+# 一键启动：MariaDB + 后端(NestJS 4000) + 前端(Next.js 3000)
+# 使用：docker compose up --build
+# 首启后端会自动建表并在空库写入演示账号（密码均为 123456）。
+services:
+  db:
+    image: mariadb:10.11
+    container_name: nuangui-db
+    environment:
+      MARIADB_ROOT_PASSWORD: root123
+      MARIADB_DATABASE: pet_aftercare
+      MARIADB_USER: petapp
+      MARIADB_PASSWORD: petapp123
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      - dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build: ./backend
+    container_name: nuangui-backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: petapp
+      DB_PASS: petapp123
+      DB_NAME: pet_aftercare
+      PORT: 4000
+    ports:
+      - "4000:4000"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # 浏览器通过本机映射端口访问后端（后端已开启 CORS）
+        NEXT_PUBLIC_API: http://127.0.0.1:4000
+    container_name: nuangui-frontend
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+
+volumes:
+  dbdata:

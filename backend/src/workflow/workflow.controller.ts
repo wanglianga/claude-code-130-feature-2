@@ -144,11 +144,30 @@ export class WorkflowController {
 
   // —— 纪念品 ——
   @Post('mementos/:mid/:action')
-  @Roles('artisan', 'customer_service', 'manager')
+  @Roles('artisan', 'customer_service', 'manager', 'artisan_supervisor')
   memento(@Param('mid', ParseIntPipe) mid: number,
           @Param('action') action: 'start' | 'fail' | 'remake' | 'done',
           @Body() body: any, @Req() req: any) {
     return this.wf.mementoAction(mid, action, body || {}, req.user);
+  }
+
+  // —— 纪念品失败处理：客服拟方案 / 制作主管复核 / 家属评价 ——
+  @Post('memento-failures/:cid/propose')
+  @Roles('customer_service', 'manager')
+  proposeFailure(@Param('cid', ParseIntPipe) cid: number, @Body() body: any, @Req() req: any) {
+    return this.wf.proposeFailureResolution(cid, body || {}, req.user);
+  }
+
+  @Post('memento-failures/:cid/review')
+  @Roles('artisan_supervisor', 'manager')
+  reviewFailure(@Param('cid', ParseIntPipe) cid: number, @Body() body: any, @Req() req: any) {
+    return this.wf.reviewFailureCase(cid, body || {}, req.user);
+  }
+
+  @Post('memento-failures/:cid/rate')
+  @Roles('owner')
+  rateFailure(@Param('cid', ParseIntPipe) cid: number, @Body() body: any, @Req() req: any) {
+    return this.wf.rateFailureCase(cid, body || {}, req.user);
   }
 
   // —— 寄送 ——

@@ -9,7 +9,7 @@ import { Hospital, Store, User } from '../src/entities/core';
 import {
   ColdStorage, FarewellRoomSlot, FurnaceSlot,
 } from '../src/entities/ops';
-import { Locker } from '../src/entities/aftercare';
+import { Locker, MementoFailureCase } from '../src/entities/aftercare';
 import { Message, Payment } from '../src/entities/billing';
 import { hashPassword } from '../src/auth/auth.service';
 
@@ -29,6 +29,7 @@ export const ds = new DataSource({
     require('../src/entities/ops').CremationCertificate,
     Locker,
     require('../src/entities/aftercare').Memento,
+    MementoFailureCase,
     require('../src/entities/aftercare').Shipment,
     require('../src/entities/aftercare').Followup,
     require('../src/entities/aftercare').AlbumMedia,
@@ -38,15 +39,19 @@ export const ds = new DataSource({
   timezone: '+08:00',
 });
 
-async function main() {
-  await ds.initialize();
-  await ds.query('SET FOREIGN_KEY_CHECKS=0');
-  for (const t of ['messages', 'payments', 'album_media', 'followups', 'shipments', 'lockers',
-    'mementos', 'cremation_certificates', 'cold_storage', 'farewell_room_slots', 'furnace_slots',
-    'confirmations', 'fee_items', 'timeline_events', 'appointments', 'hospitals', 'users', 'stores']) {
-    await ds.query(`TRUNCATE TABLE \`${t}\``).catch(() => {});
+/** 清空并重建业务数据（CLI：npm run seed） */
+export async function runSeed(opts: { wipe?: boolean } = {}) {
+  const wipe = opts.wipe !== false;
+  if (wipe) {
+    await ds.query('SET FOREIGN_KEY_CHECKS=0');
+    for (const t of ['messages', 'payments', 'album_media', 'followups', 'memento_failure_cases',
+      'shipments', 'lockers',
+      'mementos', 'cremation_certificates', 'cold_storage', 'farewell_room_slots', 'furnace_slots',
+      'confirmations', 'fee_items', 'timeline_events', 'appointments', 'hospitals', 'users', 'stores']) {
+      await ds.query(`TRUNCATE TABLE \`${t}\``).catch(() => {});
+    }
+    await ds.query('SET FOREIGN_KEY_CHECKS=1');
   }
-  await ds.query('SET FOREIGN_KEY_CHECKS=1');
 
   const stores = await ds.getRepository(Store).save([
     { name: '星河路旗舰店', address: '本市星河路 88 号', phone: '021-55001001' },
@@ -70,6 +75,9 @@ async function main() {
     hp({ username: 'fire1', name: '火化师-郑师傅', role: 'cremator', store_id: 1, phone: '13900050001' }),
     hp({ username: 'fire2', name: '火化师-高师傅', role: 'cremator', store_id: 2, phone: '13900050002' }),
     hp({ username: 'art1', name: '纪念品师-阿岚', role: 'artisan', store_id: 1, phone: '13900060001' }),
+    hp({ username: 'art2', name: '纪念品师-阿澈', role: 'artisan', store_id: 2, phone: '13900060002' }),
+    hp({ username: 'artm1', name: '制作主管-苏晴', role: 'artisan_supervisor', store_id: 1, phone: '13900060003' }),
+    hp({ username: 'artm2', name: '制作主管-严肃', role: 'artisan_supervisor', store_id: 2, phone: '13900060004' }),
     hp({ username: 'fin1', name: '财务-唐会计', role: 'finance', store_id: 1, phone: '13900070001' }),
     hp({ username: 'manager1', name: '运营总监-林总', role: 'manager', phone: '13900080001' }),
   ]);
@@ -108,8 +116,29 @@ async function main() {
   // 火化炉作为目录存在（排期记录在 furnace_slots）
   console.log('种子完成：');
   console.log(`门店 ${stores.length} 家，账号 ${users.length} 个（密码均为 123456）`);
-  console.log('主要账号：owner1 / cs1 / driver1 / rite1 / fire1 / art1 / fin1 / manager1');
+  console.log('主要账号：owner1 / cs1 / driver1 / rite1 / fire1 / art1 / artm1 / fin1 / manager1');
+}
+
+/** 供容器入口调用：表已同步；仅当无业务门店时才播种，避免覆盖已有数据 */
+export async function seedIfEmpty() {
+  await ds.initialize();
+  const cnt = await ds.getRepository(Store).count();
+  if (cnt > 0) {
+    console.log(`检测到已有 ${cnt} 家门店，跳过自动播种（如需重置请运行 npm run seed）`);
+    await ds.destroy();
+    return false;
+  }
+  await runSeed({ wipe: false });
+  await ds.destroy();
+  return true;
+}
+
+async function main() {
+  await ds.initialize();
+  await runSeed({ wipe: true });
   await ds.destroy();
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+if (require.main === module) {
+  main().catch(e => { console.error(e); process.exit(1); });
+}

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import AppShell from '../../AppShell';
 import {
   api, fmt, getSession, PET_LABEL, ROLE_LABEL, STATUS_LABEL, statusTag, yuan,
+  FAILURE_STATUS_LABEL, failureStatusTag, RESOLUTION_LABEL,
 } from '../../lib';
 
 function useDetail(id: number) {
@@ -165,37 +166,12 @@ export default function DetailPage({ params }: { params: { id: string } }) {
 
         <div>
           {/* 纪念品 */}
-          <div className="panel">
-            <h2>纪念品制作（{d.mementos.length}）</h2>
-            {d.mementos.length === 0 ? <p className="muted">本单无纪念品</p> : (
-              <table>
-                <thead><tr><th>项目</th><th>状态</th><th>承诺交付</th>{(role === 'artisan' || canCs) && <th>操作</th>}</tr></thead>
-                <tbody>
-                  {d.mementos.map((m: any) => (
-                    <tr key={m.id}>
-                      <td>{m.name}{m.fail_reason && <div className="muted" style={{ color: 'var(--bad)' }}>失败原因：{m.fail_reason}</div>}</td>
-                      <td><MementoTag s={m.status} /></td>
-                      <td>{fmt(m.due_at)}</td>
-                      {(role === 'artisan' || canCs) && (
-                        <td className="pill-actions">
-                          {m.status === 'pending' && <button className="small" onClick={() => act(() => api('POST', `/api/mementos/${m.id}/start`, {}), '已开始制作')}>开始</button>}
-                          {m.status === 'making' && <>
-                            <button className="small danger" onClick={() => {
-                              const reason = prompt('失败原因？') || '工艺原因';
-                              act(() => api('POST', `/api/mementos/${m.id}/fail`, { reason }), '已登记失败，已生成家属关怀回访');
-                            }}>登记失败</button>
-                            <button className="small ok" onClick={() => act(() => api('POST', `/api/mementos/${m.id}/done`, { media: [] }), '已完成')}>完成</button>
-                          </>}
-                          {m.status === 'failed' && <button className="small" onClick={() => act(() => api('POST', `/api/mementos/${m.id}/remake`, {}), '已安排重做（3 日内交付）')}>安排重做</button>}
-                          {m.status === 'remake' && <button className="small ok" onClick={() => act(() => api('POST', `/api/mementos/${m.id}/done`, { media: [] }), '重做完成')}>重做完成</button>}
-                        </td>
-                      )}
-                    </tr>
-                  ))}
-                </tbody>
-      </table>
-            )}
-          </div>
+          <MementoPanel a={a} d={d} role={role} canCs={canCs} act={act} />
+
+          {/* 纪念品失败处理 */}
+          {d.failure_cases?.length > 0 && (
+            <FailureCasesPanel a={a} d={d} role={role} canCs={canCs} act={act} reload={load} />
+          )}
 
           {/* 骨灰盒寄送 */}
           <div className="panel">
@@ -318,12 +294,12 @@ function PendingConfirm({ c, id, isOwner, canCs, onDone }: any) {
       onDone();
     } catch (e: any) { setErr(e.message); setBusy(false); }
   }
-  const subjectMap: any = { plan: '服务方案', fee_change: '费用变更', ceremony_time: '仪式时间改期', video_witness: '视频见证' };
+  const subjectMap: any = { plan: '服务方案', fee_change: '费用变更', ceremony_time: '仪式时间改期', video_witness: '视频见证', memento_failure: '纪念品失败处理方案' };
   const isReschedule = c.subject === 'ceremony_time';
   return (
     <div style={{ borderBottom: '1px dashed var(--line)', paddingBottom: 10, marginBottom: 10 }}>
       <span className="tag warn">{subjectMap[c.subject] || c.subject} · 待处理</span>
-      <p style={{ margin: '6px 0' }}>{String(c.content).replace(/\[(FEE|TIME)\].*?\[\/\1\]/g, '')}</p>
+      <p style={{ margin: '6px 0', whiteSpace: 'pre-line' }}>{String(c.content).replace(/\[(FEE|TIME|CASE)\].*?\[\/\1\]/g, '')}</p>
       {err && <div className="error">{err}</div>}
       {isReschedule ? (
         canCs ? (
@@ -532,12 +508,17 @@ function RoleActions({ role, a, d, staff, resources, planConfirmed, act, reload 
 
   // 纪念品
   if (role === 'artisan') return (
-    <div className="panel"><h2>纪念品工作台</h2><p className="muted">请在右侧「纪念品制作」面板对制作单执行开始 / 失败登记 / 重做 / 完成。失败登记会立即触发客服关怀回访。</p></div>
+    <div className="panel"><h2>纪念品工作台</h2><p className="muted">请在右侧「纪念品制作」面板对制作单执行开始 / 失败登记（关联制作人、剩余材料、主人选择）/ 完成。失败处理方案经主人确认后，重做/替代单按新承诺时间制作，完成后送制作主管复核。</p></div>
+  );
+
+  // 纪念品制作主管
+  if (role === 'artisan_supervisor') return (
+    <div className="panel"><h2>制作主管工作台</h2><p className="muted">请在右侧「纪念品失败处理」面板查看失败立案、剩余材料与主人选择；重做/替代成品完成后在此<b>复核通过</b>（交付家属评价）或<b>退回重做</b>。复核结论与材料占用全程留痕。</p></div>
   );
 
   // 财务
   if (role === 'finance') return (
-    <div className="panel"><h2>财务工作台</h2><p className="muted">请在下方「费用明细与变化」面板登记收款或退款。</p></div>
+    <div className="panel"><h2>财务工作台</h2><p className="muted">纪念品失败处理经主人确认后，费用调整（重做补差 / 退款冲减 / 替代差价）会自动生成已确认费用项并同步到下方「费用明细与变化」与最终应收；请据此在费用面板核对台账、登记收款或退款。</p></div>
   );
 
   return null;
@@ -654,10 +635,264 @@ function MessagePanel({ a, d, me, reload }: any) {
 }
 
 function MementoTag({ s }: { s: string }) {
-  const map: any = { pending: ['待制作', 'warn'], making: ['制作中', 'info'], failed: ['制作失败', 'bad'], remake: ['重做中', 'warn'], done: ['已完成', 'ok'] };
+  const map: any = {
+    pending: ['待制作', 'warn'], making: ['制作中', 'info'], failed: ['制作失败', 'bad'],
+    remake: ['重做中', 'warn'], done: ['已完成', 'ok'],
+    refunded: ['已退款·不交付', 'bad'], replaced: ['已被替代', 'warn'],
+  };
   const [t, c] = map[s] || [s, ''];
   return <span className={`tag ${c}`}>{t}</span>;
 }
+
+function MementoPanel({ a, d, role, canCs, act }: any) {
+  const [failFor, setFailFor] = useState<any>(null);
+  const [form, setForm] = useState({ reason: '', remaining_materials: '', owner_choice: '', remaining_attempts: '1' });
+  const canMake = ['artisan', 'artisan_supervisor', 'customer_service', 'manager'].includes(role);
+  return (
+    <div className="panel">
+      <h2>纪念品制作（{d.mementos.length}）</h2>
+      {d.mementos.length === 0 ? <p className="muted">本单无纪念品</p> : (
+        <table>
+          <thead><tr><th>项目</th><th>关联制作人</th><th>状态</th><th>承诺交付</th>{canMake && <th>操作</th>}</tr></thead>
+          <tbody>
+            {d.mementos.map((m: any) => {
+              const artisan = d.failure_cases?.find((c: any) => c.artisan_id === m.artisan_id)?.artisan_name;
+              return (
+                <tr key={m.id}>
+                  <td>
+                    {m.name}
+                    {m.fail_reason && <div className="muted" style={{ color: 'var(--bad)' }}>失败原因：{m.fail_reason}</div>}
+                    {m.remaining_materials && <div className="muted">剩余材料：{m.remaining_materials}</div>}
+                    {m.owner_choice && <div className="muted">主人选择：{m.owner_choice}</div>}
+                    {m.remake_material_used > 0 && <div className="muted">重做已占用材料 {m.remake_material_used} 份</div>}
+                  </td>
+                  <td className="muted">{artisan || (m.artisan_id ? `#${m.artisan_id}` : '未分配')}</td>
+                  <td><MementoTag s={m.status} /></td>
+                  <td>{fmt(m.due_at)}</td>
+                  {canMake && (
+                    <td className="pill-actions">
+                      {m.status === 'pending' && <button className="small" onClick={() => act(() => api('POST', `/api/mementos/${m.id}/start`, {}), '已开始制作')}>开始</button>}
+                      {m.status === 'making' && <>
+                        <button className="small danger" onClick={() => { setFailFor(m); setForm({ reason: '', remaining_materials: '', owner_choice: '', remaining_attempts: '1' }); }}>登记失败</button>
+                        <button className="small ok" onClick={() => act(() => api('POST', `/api/mementos/${m.id}/done`, { media: [] }), '已完成')}>完成</button>
+                      </>}
+                      {/* 已立失败处理工单的，重做须走客服方案→主人确认，见下方失败处理面板 */}
+                      {m.status === 'failed' && !m.failure_case_id &&
+                        <button className="small" onClick={() => act(() => api('POST', `/api/mementos/${m.id}/remake`, {}), '已安排重做（3 日内交付）')}>安排重做</button>}
+                      {m.status === 'failed' && m.failure_case_id && <span className="tag warn">等待失败处理方案</span>}
+                      {(m.status === 'remake' || (m.failure_case_id && ['remake'].includes(m.status))) &&
+                        <button className="small ok" onClick={() => act(() => api('POST', `/api/mementos/${m.id}/done`, { media: [] }), '已完成，等待主管复核')}>制作完成·送复核</button>}
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+
+      {failFor && (
+        <div style={{ border: '1px solid var(--bad)', borderRadius: 8, padding: 12, marginTop: 10, background: 'var(--panel2, #faf6f2)' }}>
+          <h3 style={{ marginTop: 0 }}>登记「{failFor.name}」制作失败</h3>
+          <p className="muted">失败立案后将关联制作人、剩余可用材料与主人选择，并立即生成客服关怀回访；处理须由客服拟定重做/退款/替代方案并经主人确认。</p>
+          <label>失败原因</label>
+          <input value={form.reason} onChange={e => setForm({ ...form, reason: e.target.value })} placeholder="如：脱模时泥坯开裂 / 毛发封存瓶渗漏" />
+          <label>剩余可用材料（关键：决定能否重做）</label>
+          <input value={form.remaining_materials} onChange={e => setForm({ ...form, remaining_materials: e.target.value })} placeholder="如：余泥 2 份 / 毛发余量 0.3g，仅够 1 次" />
+          <label>主人原始选择</label>
+          <input value={form.owner_choice} onChange={e => setForm({ ...form, owner_choice: e.target.value })} placeholder="如：深棕泥 + 名字刻字 / 银色吊坠瓶" />
+          <label>剩余可重做次数</label>
+          <input type="number" min="0" value={form.remaining_attempts} onChange={e => setForm({ ...form, remaining_attempts: e.target.value })} style={{ width: 120 }} />
+          <div className="pill-actions" style={{ marginTop: 8 }}>
+            <button className="small danger" onClick={() => {
+              if (!form.reason) return alert('请填写失败原因');
+              act(() => api('POST', `/api/mementos/${failFor.id}/fail`, {
+                reason: form.reason, remaining_materials: form.remaining_materials,
+                owner_choice: form.owner_choice, remaining_attempts: Number(form.remaining_attempts || 0),
+              }), '已立失败处理工单并通知客服');
+              setFailFor(null);
+            }}>确认失败立案</button>
+            <button className="small ghost" onClick={() => setFailFor(null)}>取消</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FailureCasesPanel({ a, d, role, canCs, act, reload }: any) {
+  return (
+    <div className="panel">
+      <h2>纪念品失败处理（{d.failure_cases.length}）</h2>
+      <p className="muted">
+        每个失败纪念品一条处理工单：客服提供<b>重做 / 退款 / 替代纪念品</b>，
+        须说明<b>不可逆风险</b>与材料占用；主人确认后费用调整同步财务、制作排期同步更新；
+        成品由<b>制作主管复核</b>，最后由<b>家属评价</b>结案。
+      </p>
+      {d.failure_cases.map((c: any) => (
+        <FailureCaseCard key={c.id} c={c} role={role} canCs={canCs} act={act} reload={reload} />
+      ))}
+    </div>
+  );
+}
+
+function FailureCaseCard({ c, role, canCs, act, reload }: any) {
+  const [form, setForm] = useState<any>({
+    resolution: 'remake', fee_adjustment: '0', fee_title: '', promised_at: '',
+    irreversible_risk: '', material_consume: '', alternative_name: '', note: '',
+  });
+  const [show, setShow] = useState(false);
+  const isOwner = role === 'owner';
+  const isSupervisor = ['artisan_supervisor', 'manager'].includes(role);
+  const dueDefault = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 16);
+
+  return (
+    <div style={{ border: '1px solid var(--line)', borderRadius: 8, padding: 12, margin: '10px 0' }}>
+      <div className="row" style={{ alignItems: 'center' }}>
+        <b>「{c.memento_name}」</b>
+        <span className={`tag ${failureStatusTag(c.status)}`}>{FAILURE_STATUS_LABEL[c.status] || c.status}</span>
+        {c.resolution && <span className="tag info">{RESOLUTION_LABEL[c.resolution]}</span>}
+        <span className="spacer" style={{ flex: 1 }} />
+        <span className="muted">制作人：{c.artisan_name || '—'} · 客服：{c.cs_name || '—'}</span>
+      </div>
+
+      <dl className="kv" style={{ marginTop: 6 }}>
+        <dt>失败原因</dt><dd>{c.fail_reason || '—'}</dd>
+        <dt>剩余可用材料</dt><dd style={{ color: c.remaining_materials ? undefined : 'var(--bad)' }}>{c.remaining_materials || '未登记'}{c.remaining_attempts > 0 ? `（可重做 ${c.remaining_attempts} 次）` : ''}</dd>
+        <dt>主人选择</dt><dd>{c.owner_choice || '—'}</dd>
+      </dl>
+
+      {/* 已拟定方案展示（主人确认走顶部「待家属确认」；此处只读展示给各岗位） */}
+      {c.proposed_at && c.resolution && (
+        <div style={{ background: '#faf7f2', borderRadius: 6, padding: 8, margin: '6px 0' }}>
+          <div>处理方案：<b>{RESOLUTION_LABEL[c.resolution]}</b>{c.alternative_name ? `（${c.alternative_name}）` : ''}</div>
+          {Number(c.fee_adjustment) !== 0 && <div>费用调整：<b className="mono" style={{ color: Number(c.fee_adjustment) < 0 ? 'var(--ok)' : 'var(--bad)' }}>{yuan(c.fee_adjustment)}</b>（确认后同步财务）</div>}
+          {c.promised_at && <div>承诺交付 / 制作排期：{fmt(c.promised_at)}</div>}
+          {c.material_consume && <div>重做占用材料：{c.material_consume}</div>}
+          {c.irreversible_risk && <div style={{ color: 'var(--bad)' }}>⚠ 不可逆风险：{c.irreversible_risk}</div>}
+          {c.proposal_note && <div className="muted">备注：{c.proposal_note}</div>}
+          {c.owner_confirmed_at && <div className="muted">主人已于 {fmt(c.owner_confirmed_at)} 确认{Number(c.fee_adjustment) !== 0 ? '，费用已入账' : ''}</div>}
+        </div>
+      )}
+
+      {/* 主管复核结论 / 家属评价 */}
+      {c.reviewed_at && (
+        <div className="muted" style={{ marginTop: 4 }}>
+          主管复核：{c.review_result === 'approved' ? '✅ 通过' : '↩ 退回重做'}（{c.supervisor_name} {fmt(c.reviewed_at)}）{c.review_note ? ` · ${c.review_note}` : ''}
+        </div>
+      )}
+      {c.rating && (
+        <div style={{ marginTop: 4 }}>家属评价：{'★'.repeat(c.rating)}<span className="muted">{'★'.repeat(5 - c.rating)} {c.rating_note || ''}</span></div>
+      )}
+
+      {/* 客服：拟定 / 重新拟定方案 */}
+      {canCs && ['open', 'owner_rejected', 'proposed'].includes(c.status) && (
+        <div style={{ marginTop: 8 }}>
+          {!show ? <button className="small" onClick={() => { setShow(true); if (!form.promised_at) setForm(f => ({ ...f, promised_at: dueDefault })); }}>{c.status === 'proposed' ? '重新拟定方案' : '拟定处理方案'}</button> : (
+            <div>
+              <div className="row">
+                <label>方案</label>
+                <select value={form.resolution} onChange={e => setForm({ ...form, resolution: e.target.value })}>
+                  <option value="remake">重做（占用剩余材料）</option>
+                  <option value="refund">退款（不再制作）</option>
+                  <option value="alternative">替代纪念品</option>
+                </select>
+              </div>
+              <div className="grid3">
+                <div><label>费用调整（负数退款）</label>
+                  <input type="number" value={form.fee_adjustment} onChange={e => setForm({ ...form, fee_adjustment: e.target.value })} /></div>
+                <div><label>费用项目名称</label>
+                  <input value={form.fee_title} onChange={e => setForm({ ...form, fee_title: e.target.value })} placeholder="留空用默认名称" /></div>
+                {form.resolution !== 'refund' && <div><label>承诺交付时间</label>
+                  <input type="datetime-local" value={form.promised_at} onChange={e => setForm({ ...form, promised_at: e.target.value })} /></div>}
+              </div>
+              {form.resolution === 'alternative' && (
+                <div><label>替代纪念品名称</label>
+                  <input value={form.alternative_name} onChange={e => setForm({ ...form, alternative_name: e.target.value })} placeholder="如：水晶毛发吊坠 / 照片镌刻摆件" /></div>
+              )}
+              {form.resolution === 'remake' && <>
+                <label>重做将占用的剩余材料（必填）</label>
+                <input value={form.material_consume} onChange={e => setForm({ ...form, material_consume: e.target.value })} placeholder="如：剩余爪印泥 1 份（用后无备用）" />
+                <label>不可逆风险告知（必填）</label>
+                <input value={form.irreversible_risk} onChange={e => setForm({ ...form, irreversible_risk: e.target.value })} placeholder="如：剩余毛发/泥坯为唯一纪念材料，再次失败将无法重做" />
+              </>}
+              <label>方案备注</label>
+              <input value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} />
+              <div className="pill-actions" style={{ marginTop: 6 }}>
+                <button className="small ok" onClick={() => act(async () => {
+                  await api('POST', `/api/memento-failures/${c.id}/propose`, {
+                    resolution: form.resolution,
+                    fee_adjustment: Number(form.fee_adjustment || 0),
+                    fee_title: form.fee_title || undefined,
+                    promised_at: form.resolution === 'refund' ? undefined : new Date(form.promised_at).toISOString(),
+                    material_consume: form.material_consume || undefined,
+                    irreversible_risk: form.irreversible_risk || undefined,
+                    alternative_name: form.alternative_name || undefined,
+                    note: form.note || undefined,
+                  });
+                  setShow(false);
+                }, '方案已拟定，等待主人确认')}>提交方案给主人确认</button>
+                <button className="small ghost" onClick={() => setShow(false)}>收起</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 制作人员：查看执行提示（重做/替代单在上方纪念品表操作） */}
+      {role === 'artisan' && ['remake_confirmed', 'alternative_confirmed'].includes(c.status) && (
+        <p className="tag info" style={{ marginTop: 6 }}>
+          请在上方纪念品表按承诺时间 {fmt(c.promised_at)} 完成{c.resolution === 'alternative' ? `替代纪念品「${c.alternative_name}」` : '重做件'}，完成后自动送主管复核
+        </p>
+      )}
+
+      {/* 制作主管复核 */}
+      {isSupervisor && c.status === 'reviewing' && (
+        <div className="pill-actions" style={{ marginTop: 8 }}>
+          <button className="small ok" onClick={() => {
+            const note = prompt('复核意见（通过）？') || '质量合格，同意交付';
+            act(() => api('POST', `/api/memento-failures/${c.id}/review`, { approve: true, note }), '复核通过，等待家属评价');
+          }}>复核通过</button>
+          <button className="small danger" onClick={() => {
+            const note = prompt('退回原因？') || '质量不达标，需重新制作';
+            act(() => api('POST', `/api/memento-failures/${c.id}/review`, { approve: false, note }), '已退回重新制作');
+          }}>退回重做</button>
+        </div>
+      )}
+
+      {/* 家属评价 */}
+      {isOwner && c.status === 'reviewed' && <RatingBox c={c} onDone={reload} />}
+      {isOwner && c.status === 'proposed' && <p className="tag warn" style={{ marginTop: 6 }}>请在本页顶部「待家属确认」查看方案（含不可逆风险）后确认</p>}
+    </div>
+  );
+}
+
+function RatingBox({ c, onDone }: any) {
+  const [rating, setRating] = useState(5);
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  return (
+    <div style={{ marginTop: 8 }}>
+      <label>对本次失败处理结果评价</label>
+      <div className="row">
+        {[1, 2, 3, 4, 5].map(n => (
+          <button key={n} type="button" className="ghost small"
+            style={{ fontWeight: n <= rating ? 'bold' : 'normal', color: n <= rating ? '#c8862d' : undefined }}
+            onClick={() => setRating(n)}>{'★'.repeat(n)}</button>
+        ))}
+      </div>
+      <input placeholder="评价留言（可选）" value={note} onChange={e => setNote(e.target.value)} />
+      {err && <div className="error">{err}</div>}
+      <button className="small ok" disabled={busy} style={{ marginTop: 6 }} onClick={async () => {
+        setBusy(true); setErr('');
+        try { await api('POST', `/api/memento-failures/${c.id}/rate`, { rating, note }); onDone(); }
+        catch (e: any) { setErr(e.message); setBusy(false); }
+      }}>提交评价并结案</button>
+    </div>
+  );
+}
+
 function ShipmentTag({ s }: { s: string }) {
   const map: any = { in_transit: ['在途', 'info'], delivered: ['已送达', ''], damaged: ['破损', 'bad'], resent: ['已补发', 'warn'], claimed: ['已签收', 'ok'] };
   const [t, c] = map[s] || [s, ''];

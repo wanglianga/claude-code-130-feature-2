@@ -6,7 +6,7 @@ import { Store, User, Hospital } from '../entities/core';
 import {
   ColdStorage, Confirmation, FarewellRoomSlot, FeeItem, FurnaceSlot, CremationCertificate,
 } from '../entities/ops';
-import { AlbumMedia, Followup, Locker, Memento, Shipment } from '../entities/aftercare';
+import { AlbumMedia, Followup, Locker, Memento, MementoFailureCase, Shipment } from '../entities/aftercare';
 import { Message, Payment } from '../entities/billing';
 import { suggestQuote, weightAdjustment } from './pricing';
 
@@ -25,6 +25,7 @@ export class WorkflowService {
     @InjectRepository(ColdStorage) private cold: Repository<ColdStorage>,
     @InjectRepository(CremationCertificate) private certs: Repository<CremationCertificate>,
     @InjectRepository(Memento) private mementos: Repository<Memento>,
+    @InjectRepository(MementoFailureCase) private failureCases: Repository<MementoFailureCase>,
     @InjectRepository(Shipment) private shipments: Repository<Shipment>,
     @InjectRepository(Locker) private lockers: Repository<Locker>,
     @InjectRepository(Followup) private followups: Repository<Followup>,
@@ -124,7 +125,7 @@ export class WorkflowService {
     const a = await this.getAccessible(id, user);
     const [
       timeline, fees, confirmations, furnaces, rooms, coldRows, cert,
-      mementos, shipments, locker, followups, album, payments, messages,
+      mementos, shipments, locker, followups, album, payments, messages, failureCases,
     ] = await Promise.all([
       this.timeline.find({ where: { appointment_id: id }, order: { id: 'ASC' } }),
       this.fees.find({ where: { appointment_id: id }, order: { id: 'ASC' } }),
@@ -140,8 +141,17 @@ export class WorkflowService {
       this.albums.find({ where: { appointment_id: id }, order: { id: 'DESC' } }),
       this.payments.find({ where: { appointment_id: id }, order: { id: 'ASC' } }),
       this.messages.find({ where: { appointment_id: id }, order: { id: 'ASC' } }),
+      this.failureCases.find({ where: { appointment_id: id }, order: { id: 'ASC' } }),
     ]);
     const owner = await this.users.findOne({ where: { id: a.owner_id } });
+    // 纪念品失败处理单关联人员（制作人 / 客服 / 主管 / 财务）姓名，供各端展示
+    const caseUserIds = new Set<number>();
+    failureCases.forEach(c => {
+      [c.artisan_id, c.cs_id, c.supervisor_id, c.finance_id].forEach(id => { if (id) caseUserIds.add(id); });
+    });
+    const caseUserRows = caseUserIds.size ? await this.users.find({ where: { id: In([...caseUserIds]) } }) : [];
+    const caseUsers: Record<number, { name: string; role: string; phone: string }> = {};
+    caseUserRows.forEach(u => { caseUsers[u.id] = { name: u.name, role: u.role, phone: u.phone }; });
     const quoteTotal = fees.filter(f => f.entry_type === 'base')
       .reduce((s, f) => s + Number(f.amount), 0);
     const confirmedChange = fees.filter(f => f.entry_type === 'change' && f.confirm_status === 'confirmed')
@@ -150,13 +160,16 @@ export class WorkflowService {
       .reduce((s, f) => s + Number(f.amount), 0);
     const paid = payments.filter(p => p.status === 'paid').reduce((s, p) => s + Number(p.amount), 0);
     const refunded = payments.filter(p => p.status === 'refunded').reduce((s, p) => s + Number(p.amount), 0);
-    const openExceptions = timeline.filter(t => t.flag === 'exception').length
-      - timeline.filter(t => t.flag === 'resolved').length;
+    // 未闭环异常数：按「异常事件 − 已闭环事件」统计，单个工单不计负数
+    const openExceptions = Math.max(0,
+      timeline.filter(t => t.flag === 'exception').length
+      - timeline.filter(t => t.flag === 'resolved').length);
     return {
       appointment: a,
       owner: owner ? { id: owner.id, name: owner.name, phone: owner.phone } : null,
       timeline, fees, confirmations, furnaces, rooms, cold_storage: coldRows,
       certificate: cert, mementos, shipments, locker, followups, album, payments, messages,
+      memento_cases: failureCases, memento_case_users: caseUsers,
       fee_summary: {
         quote_total: quoteTotal,
         confirmed_change: confirmedChange,
@@ -277,12 +290,20 @@ export class WorkflowService {
           start_at: ceremonyAt, end_at: new Date(+ceremonyAt + 60 * 60000),
         });
       }
-      // 纪念品制作单
-      const mkMemento = (kind: string, name: string) =>
-        m.getRepository(Memento).insert(m.getRepository(Memento).create({
+      // 纪念品制作单（关联剩余可用材料：爪印泥 / 宠物毛发）
+      const MATERIAL: Record<string, { name: string; qty: number }> = {
+        pawprint: { name: '爪印泥', qty: 2 },
+        hair: { name: '留存宠物毛发', qty: 1 },
+        photo_album: { name: '照片视频素材', qty: 1 },
+      };
+      const mkMemento = (kind: string, name: string) => {
+        const mat = MATERIAL[kind] || { name: '剩余材料', qty: 1 };
+        return m.getRepository(Memento).insert(m.getRepository(Memento).create({
           appointment_id: id, kind, name, status: 'pending',
           due_at: furnaceAt, artisan_id: dto.artisan_id || null,
+          material_name: mat.name, material_remaining: mat.qty,
         }));
+      };
       if (a.pawprint_hair) await mkMemento('pawprint', '爪印纪念品');
       if (a.pawprint_hair) await mkMemento('hair', '毛发纪念坠');
       if (a.photo_video) await mkMemento('photo_album', '照片视频纪念相册');
@@ -366,6 +387,20 @@ export class WorkflowService {
     if (c.subject === 'ceremony_time') {
       throw new BadRequestException('改期申请须由客服审批排期，请等待客服处理');
     }
+    if (c.subject === 'memento_case') {
+      if (user.role !== 'owner') throw new ForbiddenException('失败处理方案须由主人本人确认');
+      const marker = c.content.match(/\[CASE\](\d+)\[\/CASE\]/);
+      if (!marker) throw new BadRequestException('确认事项缺少处理单关联');
+      const mc = await this.failureCases.findOne({ where: { id: Number(marker[1]) } });
+      if (!mc) throw new NotFoundException('失败处理单不存在');
+      if (mc.status !== 'owner_pending') throw new BadRequestException('该处理方案当前不可确认');
+      await this.confirms.update(cid, {
+        status: dto.approve ? 'confirmed' : 'rejected',
+        confirmed_at: new Date(), reply_note: dto.note || null,
+      });
+      await this.decideMementoCase(mc, dto.approve, dto.note, user);
+      return;
+    }
     await this.confirms.update(cid, {
       status: dto.approve ? 'confirmed' : 'rejected',
       confirmed_at: new Date(), reply_note: dto.note || null,
@@ -421,6 +456,12 @@ export class WorkflowService {
         appointment_id: id, node_key: 'picked_up', flag: 'normal',
         title: '接送员接走宠物，交接照片已上传', actor_id: user.sub, actor_role: user.role,
         media_urls: dto.media, note: dto.note, occurred_at: new Date(),
+      }));
+      // 实际接运完成 → 闭环此前的交通延误异常
+      await m.getRepository(TimelineEvent).insert(m.getRepository(TimelineEvent).create({
+        appointment_id: id, node_key: 'pickup_delay', flag: 'resolved',
+        title: '已按顺延承诺时间完成接运，交通延误闭环',
+        actor_id: user.sub, actor_role: user.role, occurred_at: new Date(),
       }));
     });
     // 体重与报价不符 → 自动产生补差费用变更，等家属确认
@@ -512,38 +553,348 @@ export class WorkflowService {
 
   // ============ 纪念品 ============
 
-  async mementoAction(mid: number, action: 'start' | 'fail' | 'remake' | 'done', dto: any, user: U) {
+  async mementoAction(mid: number, action: 'start' | 'fail' | 'done', dto: any, user: U) {
     const m = await this.mementos.findOne({ where: { id: mid } });
     if (!m) throw new NotFoundException('纪念品单不存在');
     const a = await this.getAccessible(m.appointment_id, user);
     if (action === 'start') {
-      await this.mementos.update(mid, { status: 'making', artisan_id: user.sub });
+      // 制作人开始制作才关联到本人；客服/管理者代操作保留原排定制作人
+      await this.mementos.update(mid, {
+        status: 'making', artisan_id: user.role === 'artisan' ? user.sub : (m.artisan_id || user.sub) });
       await this.event(a.id, 'memento_start', `纪念品「${m.name}」开始制作`, { actor: user });
     } else if (action === 'fail') {
+      if (m.status === 'done') throw new BadRequestException('该纪念品已完成，不能登记失败');
+      // 失败消耗一份材料（制作本身占用的那份已不可逆损耗）
+      const consumed = Math.max(0, m.material_remaining - 1);
       await this.ds.transaction(async tx => {
-        await tx.getRepository(Memento).update(mid, { status: 'failed', fail_reason: dto.reason });
+        await tx.getRepository(Memento).update(mid, {
+          status: 'failed', fail_reason: dto.reason, material_remaining: consumed,
+          artisan_id: user.role === 'artisan' ? user.sub : m.artisan_id,
+        });
         await tx.getRepository(TimelineEvent).insert(tx.getRepository(TimelineEvent).create({
           appointment_id: a.id, node_key: 'memento_failed', flag: 'exception',
-          title: `纪念品「${m.name}」制作失败，等待重做安排`,
+          title: `纪念品「${m.name}」制作失败，等待客服提出处理方案`,
           actor_id: user.sub, actor_role: user.role, note: dto.reason, occurred_at: new Date(),
         }));
         // 纪念品失败 → 生成专项关怀回访，改变客服回访节奏
         await tx.getRepository(Followup).insert(tx.getRepository(Followup).create({
           appointment_id: a.id, trigger: 'memento_failed', planned_at: new Date(),
-          content: `纪念品「${m.name}」制作失败（${dto.reason}），立即联系家属说明并安抚情绪`,
+          content: `纪念品「${m.name}」制作失败（${dto.reason}），立即联系家属说明并安抚情绪，关联制作人 #${user.sub} 与剩余材料 ${consumed} 份`,
+        }));
+        // 同步制作人员：失败与材料余量可见
+        await tx.getRepository(Message).insert(tx.getRepository(Message).create({
+          appointment_id: a.id, sender_id: user.sub, sender_role: user.role,
+          sender_name: user.name,
+          content: `【制作失败登记】${m.name}：${dto.reason}。材料「${m.material_name}」剩余 ${consumed} 份，已转客服提出重做/退款/替代方案。`,
         }));
       });
-    } else if (action === 'remake') {
-      await this.mementos.update(mid, { status: 'remake', fail_reason: null,
-        due_at: new Date(Date.now() + 3 * 86400000) });
-      await this.event(a.id, 'memento_remake', `纪念品「${m.name}」安排重做，承诺 3 日内交付`,
-        { actor: user, flag: 'resolved' });
     } else if (action === 'done') {
       await this.mementos.update(mid, { status: 'done', finished_at: new Date(), media_urls: dto.media || [] });
       await this.event(a.id, 'memento_done', `纪念品「${m.name}」制作完成`, {
         actor: user, media: dto.media });
     }
     return this.mementos.findOne({ where: { id: mid } });
+  }
+
+  /** 客服（主管复核前）查询失败处理单 */
+  private async getCaseAccessible(caseId: number, user: U): Promise<{ c: MementoFailureCase; a: Appointment; m: Memento }> {
+    const c = await this.failureCases.findOne({ where: { id: caseId } });
+    if (!c) throw new NotFoundException('失败处理单不存在');
+    const a = await this.getAccessible(c.appointment_id, user);
+    const m = await this.mementos.findOne({ where: { id: c.memento_id } });
+    if (!m) throw new NotFoundException('纪念品单不存在');
+    return { c, a, m };
+  }
+
+  /**
+   * 客服提出失败处理方案：重做 / 退款 / 替代纪念品。
+   * 必须填写不可逆风险提示；生成后先进入制作主管复核。
+   */
+  async proposeMementoCase(mid: number, dto: {
+    option: 'remake' | 'refund' | 'alternative';
+    risk_notice: string;
+    option_note?: string;
+    alternative_name?: string;
+    fee_delta?: number;
+  }, user: U) {
+    const m = await this.mementos.findOne({ where: { id: mid } });
+    if (!m) throw new NotFoundException('纪念品单不存在');
+    const a = await this.getAccessible(m.appointment_id, user);
+    if (m.status !== 'failed') throw new BadRequestException('仅制作失败的纪念品可提出处理方案');
+    if (!['remake', 'refund', 'alternative'].includes(dto.option)) {
+      throw new BadRequestException('处理方式须为 remake 重做 / refund 退款 / alternative 替代纪念品');
+    }
+    if (!dto.risk_notice || !String(dto.risk_notice).trim()) {
+      throw new BadRequestException('必须向家属说明不可逆风险（材料余量不足、二次制作仍可能失败等）');
+    }
+    if (dto.option === 'remake' && m.material_remaining <= 0) {
+      throw new BadRequestException(`材料「${m.material_name}」已无剩余，不能安排重做，请选择退款或替代纪念品`);
+    }
+    if (dto.option === 'alternative' && !dto.alternative_name) {
+      throw new BadRequestException('请填写替代纪念品名称');
+    }
+    const feeDelta = Math.round(Number(dto.fee_delta || 0) * 100) / 100;
+    if (dto.option === 'refund' && feeDelta >= 0) {
+      throw new BadRequestException('退款方案须填写负数退款金额（费用调整栏）');
+    }
+    // 同一失败纪念品只保留一条处理单（被主管/主人驳回后在原单上修订）
+    const existing = await this.failureCases.findOne({
+      where: { memento_id: mid }, order: { id: 'DESC' } });
+    if (existing && ['applied', 'finance_done', 'closed'].includes(existing.status)) {
+      throw new BadRequestException('该纪念品失败处理已闭环，不能重复提案');
+    }
+    if (existing && !['review_rejected', 'owner_rejected'].includes(existing.status)) {
+      throw new BadRequestException('该纪念品已有处理方案在复核/确认流程中，不能重复提案');
+    }
+    const base: Partial<MementoFailureCase> = {
+      appointment_id: a.id, memento_id: mid, artisan_id: m.artisan_id,
+      material_name: m.material_name, material_on_fail: m.material_remaining,
+      fail_reason: m.fail_reason,
+      option: dto.option, status: 'review_pending',
+      risk_notice: String(dto.risk_notice).trim(),
+      option_note: dto.option_note || null,
+      alternative_name: dto.option === 'alternative' ? dto.alternative_name : null,
+      fee_delta: feeDelta.toFixed(2),
+      review_status: 'pending', review_note: null, reviewed_at: null, supervisor_id: null,
+      owner_decision: null, owner_decided_at: null, owner_note: null,
+      remake_due_at: dto.option === 'remake' ? new Date(Date.now() + 3 * 86400000) : null,
+      cs_id: user.sub, proposed_at: new Date(),
+    };
+    const c = await this.ds.transaction(async tx => {
+      let saved: MementoFailureCase;
+      if (existing && ['review_rejected', 'owner_rejected'].includes(existing.status)) {
+        await tx.getRepository(MementoFailureCase).update(existing.id, base);
+        saved = { ...existing, ...base } as MementoFailureCase;
+      } else {
+        saved = await tx.getRepository(MementoFailureCase).save(
+          tx.getRepository(MementoFailureCase).create(base as any)) as unknown as MementoFailureCase;
+      }
+      const optLabel = dto.option === 'remake' ? '重做（占用剩余材料）'
+        : dto.option === 'refund' ? '退款' : `替代纪念品（${dto.alternative_name}）`;
+      await tx.getRepository(TimelineEvent).insert(tx.getRepository(TimelineEvent).create({
+        appointment_id: a.id, node_key: 'memento_case_proposed', flag: 'normal',
+        title: `客服就「${m.name}」失败提出处理方案：${optLabel}，提交制作主管复核`,
+        actor_id: user.sub, actor_role: user.role,
+        note: `费用调整 ${feeDelta >= 0 ? '+' : ''}${feeDelta} 元；不可逆风险已告知：${dto.risk_notice}`,
+        occurred_at: new Date(),
+      }));
+      await tx.getRepository(Message).insert(tx.getRepository(Message).create({
+        appointment_id: a.id, sender_id: user.sub, sender_role: user.role, sender_name: user.name,
+        content: `【失败处理待复核】${m.name} 建议${optLabel}，关联制作人 #${m.artisan_id || '?'}、剩余材料「${m.material_name}」${m.material_remaining} 份，请制作主管复核后再请主人确认。`,
+      }));
+      return saved;
+    });
+    return c;
+  }
+
+  /** 制作主管复核：通过后才向主人发出确认；驳回则客服修订重提 */
+  async reviewMementoCase(caseId: number, dto: { approve: boolean; note?: string }, user: U) {
+    const { c, a, m } = await this.getCaseAccessible(caseId, user);
+    if (c.status !== 'review_pending') {
+      throw new BadRequestException('该处理单当前不需要主管复核');
+    }
+    if (dto.approve) {
+      // 重做方案复核时再次确认材料余量
+      if (c.option === 'remake' && m.material_remaining <= 0) {
+        throw new BadRequestException('剩余材料已不足，不能批准重做');
+      }
+      await this.ds.transaction(async tx => {
+        await tx.getRepository(MementoFailureCase).update(caseId, {
+          status: 'owner_pending', review_status: 'approved',
+          supervisor_id: user.sub, reviewed_at: new Date(), review_note: dto.note || '同意处理方案',
+        });
+        await tx.getRepository(Confirmation).insert(tx.getRepository(Confirmation).create({
+          appointment_id: a.id, subject: 'memento_case',
+          content:
+            `纪念品「${m.name}」制作失败，处理方案（已经制作主管复核）：${this.caseOptionText(c)}。` +
+            `费用调整 ${Number(c.fee_delta) >= 0 ? '+' : ''}${c.fee_delta} 元。` +
+            `⚠ 不可逆风险提示：${c.risk_notice} [CASE]${c.id}[/CASE]`,
+          status: 'pending', requested_by: c.cs_id,
+        }));
+        await tx.getRepository(TimelineEvent).insert(tx.getRepository(TimelineEvent).create({
+          appointment_id: a.id, node_key: 'memento_case_reviewed', flag: 'normal',
+          title: `制作主管复核通过「${m.name}」处理方案，已请主人确认`,
+          actor_id: user.sub, actor_role: user.role, note: dto.note || '同意', occurred_at: new Date(),
+        }));
+      });
+    } else {
+      await this.ds.transaction(async tx => {
+        await tx.getRepository(MementoFailureCase).update(caseId, {
+          status: 'review_rejected', review_status: 'rejected',
+          supervisor_id: user.sub, reviewed_at: new Date(), review_note: dto.note || '请重新评估方案',
+        });
+        await tx.getRepository(TimelineEvent).insert(tx.getRepository(TimelineEvent).create({
+          appointment_id: a.id, node_key: 'memento_case_reviewed', flag: 'exception',
+          title: `制作主管驳回「${m.name}」处理方案，客服需修订重提`,
+          actor_id: user.sub, actor_role: user.role, note: dto.note, occurred_at: new Date(),
+        }));
+      });
+    }
+    return this.failureCases.findOne({ where: { id: caseId } });
+  }
+
+  private caseOptionText(c: MementoFailureCase): string {
+    if (c.option === 'remake') return `重做（占用 1 份剩余材料「${c.material_name}」，承诺 3 日内交付）`;
+    if (c.option === 'refund') return '退款（不再制作该纪念品）';
+    return `替代纪念品：${c.alternative_name}`;
+  }
+
+  /** 主人确认/拒绝失败处理方案（由通用 respondConfirmation 在 subject=memento_case 时调用） */
+  async decideMementoCase(c: MementoFailureCase, approve: boolean, note: string | undefined, user: U) {
+    const a = await this.getAccessible(c.appointment_id, user);
+    const m = await this.mementos.findOne({ where: { id: c.memento_id } });
+    if (!m) throw new NotFoundException('纪念品单不存在');
+    if (!approve) {
+      await this.ds.transaction(async tx => {
+        await tx.getRepository(MementoFailureCase).update(c.id, {
+          status: 'owner_rejected', owner_decision: 'rejected',
+          owner_id: user.sub, owner_decided_at: new Date(), owner_note: note || null,
+        });
+        await tx.getRepository(TimelineEvent).insert(tx.getRepository(TimelineEvent).create({
+          appointment_id: a.id, node_key: 'memento_case_owner', flag: 'exception',
+          title: `主人不接受「${m.name}」处理方案，客服需重新协商`,
+          actor_id: user.sub, actor_role: user.role, note: note, occurred_at: new Date(),
+        }));
+      });
+      return;
+    }
+    const due = c.remake_due_at || new Date(Date.now() + 3 * 86400000);
+    await this.ds.transaction(async tx => {
+      // —— 1. 制作排期 / 材料同步 ——
+      if (c.option === 'remake') {
+        const fresh = await tx.getRepository(Memento).findOne({ where: { id: m.id } });
+        if (!fresh || fresh.material_remaining <= 0) {
+          throw new BadRequestException('剩余材料已不足，无法重做');
+        }
+        await tx.getRepository(Memento).update(m.id, {
+          status: 'remake', fail_reason: null, due_at: due,
+          material_remaining: fresh.material_remaining - 1,
+          remake_count: fresh.remake_count + 1,
+        });
+      } else if (c.option === 'alternative') {
+        // 替代纪念品：新建一张制作单排入制作档期，原失败单维持 failed 留痕
+        await tx.getRepository(Memento).insert(tx.getRepository(Memento).create({
+          appointment_id: a.id, kind: 'other', name: `替代纪念品·${c.alternative_name}`,
+          status: 'pending', due_at: due, artisan_id: m.artisan_id,
+          material_name: '替代材料包', material_remaining: 1,
+        }));
+      }
+
+      // —— 2. 费用调整同步财务（家属确认的费用变更，财务可见入账/退款）——
+      const delta = Number(c.fee_delta);
+      if (delta !== 0) {
+        const kind = delta < 0 ? 'refund' : 'memento';
+        const title = delta < 0
+          ? `纪念品失败处理退款/冲减：${m.name}`
+          : `替代纪念品差价补收：${c.alternative_name || m.name}`;
+        const fee = await tx.getRepository(FeeItem).save(tx.getRepository(FeeItem).create({
+          appointment_id: a.id, kind, title, amount: delta.toFixed(2),
+          reason: `纪念品「${m.name}」制作失败，主人确认处理方案（${this.caseOptionText(c)}）`,
+          operator_id: c.cs_id, entry_type: 'change', confirm_status: 'confirmed',
+        }));
+        await tx.getRepository(MementoFailureCase).update(c.id, { fee_item_id: fee.id });
+        const cur = Number(a.final_amount || a.quote_amount || 0);
+        await tx.getRepository(Appointment).update(a.id, { final_amount: (cur + delta).toFixed(2) });
+      }
+
+      // —— 3. 状态、留痕、同步消息 ——
+      await tx.getRepository(MementoFailureCase).update(c.id, {
+        status: 'applied', owner_decision: 'accepted',
+        owner_id: user.sub, owner_decided_at: new Date(), owner_note: note || null,
+        material_after: c.option === 'remake' ? Math.max(0, m.material_remaining - 1) : m.material_remaining,
+        applied_at: new Date(),
+      });
+      await tx.getRepository(TimelineEvent).insert(tx.getRepository(TimelineEvent).create({
+        appointment_id: a.id, node_key: 'memento_case_applied', flag: 'resolved',
+        title: `主人确认「${m.name}」处理方案：${this.caseOptionText(c)}，费用调整与制作排期已同步更新`,
+        actor_id: user.sub, actor_role: user.role,
+        note: `费用 ${delta >= 0 ? '+' : ''}${delta} 元${delta < 0 ? '（待财务退款）' : ''}；重做承诺交付 ${due.toLocaleString('zh-CN')}`,
+        promised_at: c.option === 'remake' ? due : null, occurred_at: new Date(),
+      }));
+      // 同步制作人员
+      await tx.getRepository(Message).insert(tx.getRepository(Message).create({
+        appointment_id: a.id, sender_id: c.cs_id || 0, sender_role: 'customer_service',
+        sender_name: '客服',
+        content: c.option === 'remake'
+          ? `【重做排期已确认】${m.name} 主人已同意重做，已占用 1 份「${c.material_name}」，承诺 ${due.toLocaleString('zh-CN')} 前交付，请按排期制作。`
+          : `【失败处理已确认】${m.name} 主人选择${this.caseOptionText(c)}，请按新安排执行。`,
+      }));
+      // 费用变化同步财务
+      if (delta !== 0) {
+        await tx.getRepository(Message).insert(tx.getRepository(Message).create({
+          appointment_id: a.id, sender_id: c.cs_id || 0, sender_role: 'customer_service',
+          sender_name: '客服',
+          content: `【费用变化同步财务】${m.name} 失败处理费用调整 ${delta >= 0 ? '+' : ''}${delta} 元，主人已确认；${delta < 0 ? '请财务安排退款。' : '请财务留意补收。'}`,
+        }));
+      }
+    });
+  }
+
+  /** 财务确认费用变化已入账（补收已核对/退款冲减已登记）；退款也可由 /refund 自动回写 */
+  async confirmCaseFinance(caseId: number, dto: { note?: string }, user: U) {
+    const { c, a, m } = await this.getCaseAccessible(caseId, user);
+    if (c.status !== 'applied') throw new BadRequestException('主人确认方案后才能进行财务确认');
+    await this.failureCases.update(caseId, {
+      status: 'finance_done', finance_id: user.sub, finance_handled_at: new Date(),
+      finance_note: dto.note || null,
+    });
+    await this.event(a.id, 'memento_case_finance',
+      `财务已确认「${m.name}」失败处理费用调整 ${c.fee_delta} 元入账`,
+      { actor: user, note: dto.note });
+    return this.failureCases.findOne({ where: { id: caseId } });
+  }
+
+  /** 家属评价处理结果（影响家属最终评价） */
+  async rateMementoCase(caseId: number, dto: { rating: number; note?: string }, user: U) {
+    const { c, a } = await this.getCaseAccessible(caseId, user);
+    if (user.role !== 'owner') throw new ForbiddenException('仅家属可评价失败处理结果');
+    if (!['applied', 'finance_done'].includes(c.status)) {
+      throw new BadRequestException('处理方案执行完成后才能评价');
+    }
+    const rating = Math.round(Number(dto.rating));
+    if (rating < 1 || rating > 5) throw new BadRequestException('评分须为 1-5 分');
+    await this.ds.transaction(async tx => {
+      await tx.getRepository(MementoFailureCase).update(caseId, {
+        status: 'closed', rating, rating_note: dto.note || null, rated_at: new Date(),
+      });
+      await tx.getRepository(TimelineEvent).insert(tx.getRepository(TimelineEvent).create({
+        appointment_id: a.id, node_key: 'memento_case_rated',
+        title: `家属评价纪念品失败处理：${rating} 星`,
+        actor_id: user.sub, actor_role: user.role, note: dto.note, occurred_at: new Date(),
+      }));
+    });
+    return this.failureCases.findOne({ where: { id: caseId } });
+  }
+
+  /** 失败处理单队列（制作主管看复核；客服/管理者看全部；制作人看本店） */
+  async listMementoCases(user: U, status?: string) {
+    const appts = await this.appts.find({
+      where: user.role === 'manager' ? {} : { store_id: user.store_id },
+      select: { id: true, pet_name: true, code: true, store_id: true },
+    });
+    const ids = appts.map(x => x.id);
+    if (!ids.length) return [];
+    const rows = await this.failureCases.find({
+      where: status ? { status: status as any } : {}, order: { id: 'DESC' }, take: 200,
+    });
+    const apptMap = new Map(appts.map(x => [x.id, x]));
+    const userIds = new Set<number>();
+    rows.forEach(c => {
+      [c.artisan_id, c.cs_id, c.supervisor_id, c.owner_id, c.finance_id].forEach(id => {
+        if (id) userIds.add(id);
+      });
+    });
+    const userRows = userIds.size
+      ? await this.users.find({ where: { id: In([...userIds]) } }) : [];
+    const userMap = new Map(userRows.map(u => [u.id, { name: u.name, role: u.role, phone: u.phone }]));
+    return rows.filter(c => ids.includes(c.appointment_id)).map(c => ({
+      ...c, appointment: apptMap.get(c.appointment_id),
+      artisan: c.artisan_id ? userMap.get(c.artisan_id) : null,
+      cs: c.cs_id ? userMap.get(c.cs_id) : null,
+      supervisor: c.supervisor_id ? userMap.get(c.supervisor_id) : null,
+      owner: c.owner_id ? userMap.get(c.owner_id) : null,
+      finance: c.finance_id ? userMap.get(c.finance_id) : null,
+    }));
   }
 
   // ============ 骨灰盒寄送 ============
@@ -752,13 +1103,43 @@ export class WorkflowService {
     return p;
   }
 
-  async refund(id: number, dto: { amount: number; reason: string }, user: U) {
+  async refund(id: number, dto: { amount: number; reason: string; case_id?: number }, user: U) {
     const a = await this.getAccessible(id, user);
     const p = await this.payments.save(this.payments.create({
       appointment_id: id, amount: String(Number(dto.amount).toFixed(2)),
       method: 'wechat', status: 'refunded', finance_id: user.sub, note: dto.reason,
     }));
-    await this.event(id, 'refund', `退款 ${dto.amount} 元`, { actor: user, flag: 'exception', note: dto.reason });
+    // 若退款对应纪念品失败处理方案，回写处理单并通知相关人员；退款本身即该异常的闭环动作
+    let caseId = dto.case_id ? Number(dto.case_id) : null;
+    if (!caseId) {
+      const c = await this.failureCases.findOne({
+        where: { appointment_id: id, status: 'applied' as any }, order: { id: 'DESC' } });
+      if (c && (c.option === 'refund' || Number(c.fee_delta) < 0)) caseId = c.id;
+    }
+    let closedByCase = false;
+    if (caseId) {
+      const c = await this.failureCases.findOne({ where: { id: caseId, appointment_id: id } });
+      if (c && c.status === 'applied') { closedByCase = true; }
+    }
+    await this.event(id, 'refund', `退款 ${dto.amount} 元`,
+      { actor: user, flag: closedByCase ? 'resolved' : 'exception', note: dto.reason });
+    if (caseId) {
+      const c = await this.failureCases.findOne({ where: { id: caseId, appointment_id: id } });
+      if (c && c.status === 'applied') {
+        await this.failureCases.update(caseId, {
+          status: 'finance_done', finance_id: user.sub, finance_handled_at: new Date(),
+          finance_note: `退款 ${dto.amount} 元（记录 #${p.id}）`,
+        });
+        const m = await this.mementos.findOne({ where: { id: c.memento_id } });
+        await this.event(id, 'memento_case_refund',
+          `财务已完成「${m?.name || '纪念品'}」失败处理退款（付款记录 #${p.id}）`,
+          { actor: user });
+        await this.messages.save(this.messages.create({
+          appointment_id: id, sender_id: user.sub, sender_role: user.role, sender_name: user.name,
+          content: `【退款同步】纪念品失败处理退款 ${dto.amount} 元已执行（记录 #${p.id}）。`,
+        }));
+      }
+    }
     return p;
   }
 
@@ -771,8 +1152,20 @@ export class WorkflowService {
     const pendingFees = detail.fees.filter((f: FeeItem) => f.confirm_status === 'pending');
     if (pendingFees.length) throw new BadRequestException('仍有费用变更未经家属确认，无法完结');
     const unfinishedMementos = detail.mementos.filter((m: Memento) =>
-      ['pending', 'making', 'failed', 'remake'].includes(m.status));
-    if (unfinishedMementos.length) throw new BadRequestException('仍有纪念品未完成（含失败待重做）');
+      ['pending', 'making', 'remake'].includes(m.status));
+    if (unfinishedMementos.length) throw new BadRequestException('仍有纪念品未完成（含重做中）');
+    // 制作失败的纪念品必须已有主人确认的失败处理方案
+    const failedMementos = detail.mementos.filter((m: Memento) => m.status === 'failed');
+    const caseByMemento = new Map<number, any>((detail.memento_cases || []).map((c: any) => [c.memento_id, c]));
+    for (const m of failedMementos) {
+      const c = caseByMemento.get(m.id);
+      if (!c || !['applied', 'finance_done', 'closed'].includes(c.status)) {
+        throw new BadRequestException(`纪念品「${m.name}」制作失败，处理方案未经主人确认，无法完结`);
+      }
+    }
+    const openCases = (detail.memento_cases || []).filter((c: any) =>
+      ['review_pending', 'review_rejected', 'owner_pending', 'owner_rejected'].includes(c.status));
+    if (openCases.length) throw new BadRequestException('仍有纪念品失败处理方案在复核/协商中，无法完结');
     if (detail.fee_summary.balance > 0.01) {
       throw new BadRequestException(`费用未结清，余额 ${detail.fee_summary.balance} 元`);
     }
@@ -823,8 +1216,13 @@ export class WorkflowService {
     const ids = appts.map(a => a.id);
     if (ids.length) {
       const ev = await this.timeline.find({ where: { appointment_id: In(ids) } });
-      exceptions = ev.filter(e => e.flag === 'exception').length
-        - ev.filter(e => e.flag === 'resolved').length;
+      // 未闭环异常按工单分别结算（异常 − 闭环），单工单不计负数后再汇总
+      const perAppt: Record<number, number> = {};
+      for (const e of ev) {
+        const cur = perAppt[e.appointment_id] || 0;
+        perAppt[e.appointment_id] = cur + (e.flag === 'exception' ? 1 : e.flag === 'resolved' ? -1 : 0);
+      }
+      exceptions = Object.values(perAppt).reduce((s, n) => s + Math.max(0, n), 0);
       const pays = await this.payments.find({ where: { appointment_id: In(ids) } });
       paid = pays.filter(p => p.status === 'paid').reduce((s, p) => s + Number(p.amount), 0)
         - pays.filter(p => p.status === 'refunded').reduce((s, p) => s + Number(p.amount), 0);
@@ -837,17 +1235,36 @@ export class WorkflowService {
         }
       }
     }
-    const [stores, expiringLockers, failedMementos, pendingFees] = await Promise.all([
+    // 失败/重做中且尚未被已闭环处理方案覆盖的纪念品，才算待处理
+    const [unhandledFailed, openCaseRows] = await Promise.all([
+      (async () => {
+        const rows = await this.mementos.find({
+          where: { status: In(['failed', 'remake']) }, select: { id: true, appointment_id: true } });
+        if (!rows.length) return 0;
+        const handled = await this.failureCases.find({
+          where: { status: In(['applied', 'finance_done', 'closed']) }, select: { memento_id: true } });
+        const handledIds = new Set(handled.map(c => c.memento_id));
+        const apptIdSet = new Set(ids);
+        return rows.filter(r => apptIdSet.has(r.appointment_id) && !handledIds.has(r.id)).length;
+      })(),
+      this.failureCases.find(),
+    ]);
+    const pendingCaseReview = openCaseRows.filter(c =>
+      ids.includes(c.appointment_id) && ['review_pending', 'review_rejected'].includes(c.status)).length;
+    const pendingOwnerCases = openCaseRows.filter(c =>
+      ids.includes(c.appointment_id) && ['owner_pending', 'owner_rejected'].includes(c.status)).length;
+    const [stores, expiringLockers, pendingFees] = await Promise.all([
       this.stores.find(),
       this.lockers.count({ where: { status: In(['expiring', 'expired']) } }),
-      this.mementos.count({ where: { status: In(['failed', 'remake']) } }),
       this.fees.count({ where: { entry_type: 'change', confirm_status: 'pending' } }),
     ]);
     return {
       total: appts.length, status_count: statusCount,
       open_exceptions: exceptions, payable_total: payable, paid_total: paid,
       breached_promises: breached.slice(0, 50),
-      expiring_lockers: expiringLockers, failed_mementos: failedMementos, pending_fees: pendingFees,
+      expiring_lockers: expiringLockers, failed_mementos: unhandledFailed, pending_fees: pendingFees,
+      memento_cases_pending_review: pendingCaseReview,
+      memento_cases_pending_owner: pendingOwnerCases,
       stores,
     };
   }

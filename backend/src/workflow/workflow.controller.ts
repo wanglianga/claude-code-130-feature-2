@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Get, Param, ParseIntPipe, Post, Query, Req, UseGuards,
+  BadRequestException, Body, Controller, Get, Param, ParseIntPipe, Post, Query, Req, UseGuards,
 } from '@nestjs/common';
 import { AuthGuard, Roles } from '../auth/auth.guard';
 import { UserRole } from '../entities/core';
@@ -143,12 +143,52 @@ export class WorkflowController {
   }
 
   // —— 纪念品 ——
+  /** 客服提出处理方案（重做 / 退款 / 替代纪念品，含不可逆风险说明）→ 制作主管复核。
+   *  注意：必须声明在通用的 mementos/:mid/:action 之前，否则会被 :action 吞掉 */
+  @Post('mementos/:mid/propose-case')
+  @Roles('customer_service', 'manager')
+  proposeCase(@Param('mid', ParseIntPipe) mid: number, @Body() body: any, @Req() req: any) {
+    return this.wf.proposeMementoCase(mid, body, req.user);
+  }
+
   @Post('mementos/:mid/:action')
   @Roles('artisan', 'customer_service', 'manager')
   memento(@Param('mid', ParseIntPipe) mid: number,
-          @Param('action') action: 'start' | 'fail' | 'remake' | 'done',
+          @Param('action') action: 'start' | 'fail' | 'done',
           @Body() body: any, @Req() req: any) {
+    if (!['start', 'fail', 'done'].includes(action)) {
+      throw new BadRequestException(`未知纪念品操作：${action}`);
+    }
     return this.wf.mementoAction(mid, action, body || {}, req.user);
+  }
+
+  // —— 纪念品制作失败处理 ——
+
+  /** 制作主管复核失败处理方案 */
+  @Post('memento-cases/:cid/review')
+  @Roles('production_supervisor', 'manager')
+  reviewCase(@Param('cid', ParseIntPipe) cid: number, @Body() body: any, @Req() req: any) {
+    return this.wf.reviewMementoCase(cid, body || {}, req.user);
+  }
+
+  /** 失败处理单队列（主管复核台 / 客服跟进 / 制作人与财务查看） */
+  @Get('memento-cases')
+  @Roles('customer_service', 'production_supervisor', 'artisan', 'finance', 'manager')
+  listCases(@Query('status') status: string, @Req() req: any) {
+    return this.wf.listMementoCases(req.user, status);
+  }
+
+  /** 家属评价失败处理结果 */
+  @Post('memento-cases/:cid/rate')
+  rateCase(@Param('cid', ParseIntPipe) cid: number, @Body() body: any, @Req() req: any) {
+    return this.wf.rateMementoCase(cid, body, req.user);
+  }
+
+  /** 财务确认失败处理费用变化（退款/冲减/补收）已入账 */
+  @Post('memento-cases/:cid/finance-confirm')
+  @Roles('finance', 'manager')
+  financeCase(@Param('cid', ParseIntPipe) cid: number, @Body() body: any, @Req() req: any) {
+    return this.wf.confirmCaseFinance(cid, body || {}, req.user);
   }
 
   // —— 寄送 ——

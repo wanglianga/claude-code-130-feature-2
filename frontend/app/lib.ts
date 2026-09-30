@@ -40,6 +40,7 @@ export const ROLE_LABEL: Record<string, string> = {
   ceremonialist: '礼仪师',
   cremator: '火化师',
   artisan: '纪念品制作',
+  production_supervisor: '制作主管',
   finance: '财务',
   manager: '管理者',
 };
@@ -87,3 +88,27 @@ export const TRIGGER_LABEL: Record<string, string> = {
   locker_expired: '到期未续费跟进',
   post_service: '服务后情绪安抚',
 };
+
+export const CASE_OPTION_LABEL: Record<string, string> = {
+  remake: '重做（占用剩余材料）',
+  refund: '退款',
+  alternative: '替代纪念品',
+};
+
+export const CASE_STATUS_LABEL: Record<string, string> = {
+  review_pending: '待制作主管复核',
+  review_rejected: '主管驳回待修订',
+  owner_pending: '待主人确认',
+  owner_rejected: '主人不接受待重新协商',
+  applied: '已执行（费用/排期已同步）',
+  finance_done: '财务已确认入账',
+  closed: '已评价闭环',
+};
+
+export function caseStatusTag(s: string) {
+  const map: Record<string, string> = {
+    review_pending: 'warn', review_rejected: 'bad', owner_pending: 'warn',
+    owner_rejected: 'bad', applied: 'ok', finance_done: 'ok', closed: 'ok',
+  };
+  return map[s] || '';
+}

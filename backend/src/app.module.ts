@@ -6,7 +6,7 @@ import { Hospital, Store, User } from './entities/core';
 import {
   ColdStorage, Confirmation, CremationCertificate, FarewellRoomSlot, FeeItem, FurnaceSlot,
 } from './entities/ops';
-import { AlbumMedia, Followup, Locker, Memento, Shipment } from './entities/aftercare';
+import { AlbumMedia, Followup, Locker, Memento, MementoFailureCase, Shipment } from './entities/aftercare';
 import { Message, Payment } from './entities/billing';
 import { WorkflowController } from './workflow/workflow.controller';
 import { WorkflowService } from './workflow/workflow.service';
@@ -14,7 +14,7 @@ import { WorkflowService } from './workflow/workflow.service';
 const entities = [
   Appointment, TimelineEvent, Store, User, Hospital,
   ColdStorage, Confirmation, FarewellRoomSlot, FeeItem, FurnaceSlot, CremationCertificate,
-  AlbumMedia, Followup, Locker, Memento, Shipment,
+  AlbumMedia, Followup, Locker, Memento, MementoFailureCase, Shipment,
   Message, Payment,
 ];
 
@@ -36,7 +36,7 @@ const entities = [
     TypeOrmModule.forFeature([
       Appointment, TimelineEvent, Store, User, Hospital,
       ColdStorage, Confirmation, FarewellRoomSlot, FeeItem, FurnaceSlot, CremationCertificate,
-      AlbumMedia, Followup, Locker, Memento, Shipment,
+      AlbumMedia, Followup, Locker, Memento, MementoFailureCase, Shipment,
       Message, Payment,
     ]),
   ],

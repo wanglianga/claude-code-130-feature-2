@@ -19,6 +19,7 @@ export type UserRole =
   | 'ceremonialist'   // 礼仪师
   | 'cremator'        // 火化师
   | 'artisan'         // 纪念品制作
+  | 'production_supervisor' // 纪念品制作主管（失败处理复核）
   | 'finance'         // 财务
   | 'manager';        // 管理者
 

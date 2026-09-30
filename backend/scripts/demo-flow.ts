@@ -38,6 +38,21 @@ async function login(u: string) {
   return r.user;
 }
 
+/** 断言某个请求必须失败（用于校验权限/业务拦截） */
+async function expectFail(method: string, path: string, body: any, who: string, keyword?: string) {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (res.ok) throw new Error(`${who} → 预期失败但成功了`);
+  const msg = await res.text();
+  if (keyword && !msg.includes(keyword)) {
+    throw new Error(`${who} → 预期错误含「${keyword}」，实际：${msg.slice(0, 200)}`);
+  }
+  log(`  拦截校验 OK：${who} → ${res.status} ${keyword || ''}`);
+}
+
 async function main() {
   // 1. 主人下单
   await login('owner1');
@@ -133,21 +148,129 @@ async function main() {
   const d4: any = await api('GET', `/api/appointments/${id}`, {});
   log(`火化证明已出具：${d4.certificate.cert_no}（单独火化：${d4.certificate.private_cremation}）`);
 
-  // 14. 纪念品：爪印制作失败 → 关怀回访 → 重做 → 完成
+  // 13.5 家属先预付当前应收（方案报价 + 体重补差），后续纪念品失败处理再做退款/补收
+  await login('fin1');
+  const prepaid = d4.fee_summary.payable;
+  await api('POST', `/api/appointments/${id}/payment`,
+    { amount: prepaid, method: 'wechat', note: '服务交付阶段预付款（纪念品交付前结算）' }, '财务登记预付');
+  log(`家属预付款 ${prepaid} 元（报价 + 体重补差），失败处理费用后续多退少补`);
+
+  // 14. 纪念品失败处理：爪印泥（重做耗材料）/ 毛发瓶（主人拒绝替代→退款）/ 相册（替代纪念品）
   await login('art1');
   const paw = d4.mementos.find((m: any) => m.kind === 'pawprint');
+  const hair = d4.mementos.find((m: any) => m.kind === 'hair');
+  const album = d4.mementos.find((m: any) => m.kind === 'photo_album');
+
+  const RISK = '爪印泥/毛发为不可再生材料，二次制作仍有失败可能；再次损耗后将无法重做。';
+
+  // —— 爪印泥：失败（2 份→1）→ 客服提案重做 → 主管复核 → 主人确认（1 份→0，排期+3 日）→ 重做完成
   await api('POST', `/api/mementos/${paw.id}/start`, {});
   await api('POST', `/api/mementos/${paw.id}/fail`,
-    { reason: '脱模时泥坯开裂' }, '纪念品失败');
-  log('纪念品失败已自动生成即时关怀回访任务');
-  await api('POST', `/api/mementos/${paw.id}/remake`, {}, '安排重做');
+    { reason: '脱模时泥坯开裂' }, '爪印泥失败');
+  await login('cs1');
+  await api('POST', `/api/mementos/${paw.id}/propose-case`, {
+    option: 'remake', fee_delta: 0, risk_notice: RISK,
+    option_note: '安排资深制作人加急重做',
+  }, '客服提案重做');
+  await login('sup1');
+  let cases: any[] = (await api('GET', `/api/appointments/${id}`, {})).memento_cases;
+  await api('POST', `/api/memento-cases/${cases[0].id}/review`,
+    { approve: true, note: '尚余 1 份爪印泥，同意重做' }, '主管复核通过');
+  // 拦截：客服不能替主人确认失败处理方案
+  await login('cs1');
+  let ownerConf: any = (await api('GET', `/api/appointments/${id}`, {})).confirmations
+    .find((c: any) => c.subject === 'memento_case' && c.status === 'pending');
+  await expectFail('POST', `/api/appointments/${id}/confirmations/${ownerConf.id}/respond`,
+    { approve: true }, '客服替主人确认失败方案', '主人本人确认');
+  await login('owner1');
+  let conf: any = (await api('GET', `/api/appointments/${id}`, {})).confirmations
+    .find((c: any) => c.subject === 'memento_case' && c.status === 'pending');
+  await api('POST', `/api/appointments/${id}/confirmations/${conf.id}/respond`,
+    { approve: true, note: '理解风险，同意重做，请一定保住布丁的爪印' }, '主人确认重做');
+  await login('art1');
   await api('POST', `/api/mementos/${paw.id}/done`,
     { media: ['https://example.com/photos/paw-ok.jpg'] }, '重做完成');
-  // 其余纪念品快速完成
-  for (const m of d4.mementos.filter((x: any) => x.id !== paw.id)) {
-    await api('POST', `/api/mementos/${m.id}/start`, {});
-    await api('POST', `/api/mementos/${m.id}/done`, { media: [] });
-  }
+  await login('owner1');
+  cases = (await api('GET', `/api/appointments/${id}`, {})).memento_cases;
+  await api('POST', `/api/memento-cases/${cases.find((c: any) => c.option === 'remake').id}/rate`,
+    { rating: 5, note: '重做的爪印很清晰，谢谢' }, '主人评价重做');
+
+  // —— 毛发纪念瓶：失败（1 份→0）→ 客服先提替代被主人拒绝 → 重新提案退款 → 主管复核 → 主人确认 → 财务退款 → 评价
+  await login('art1');
+  await api('POST', `/api/mementos/${hair.id}/start`, {});
+  await api('POST', `/api/mementos/${hair.id}/fail`,
+    { reason: '封存时发现毛发余量不足以灌注整瓶' }, '毛发瓶失败');
+  await login('cs1');
+  await api('POST', `/api/mementos/${hair.id}/propose-case`, {
+    option: 'alternative', fee_delta: 60, alternative_name: '水晶胎毛吊坠',
+    risk_notice: RISK, option_note: '余量仅够做小型吊坠',
+  }, '客服提案替代');
+  await login('sup1');
+  let detail: any = await api('GET', `/api/appointments/${id}`, {});
+  let hc = detail.memento_cases.find((c: any) => c.option === 'alternative');
+  await api('POST', `/api/memento-cases/${hc.id}/review`, { approve: true, note: '同意' });
+  await login('owner1');
+  detail = await api('GET', `/api/appointments/${id}`, {});
+  conf = detail.confirmations.find((c: any) => c.subject === 'memento_case' && c.status === 'pending');
+  await api('POST', `/api/appointments/${id}/confirmations/${conf.id}/respond`,
+    { approve: false, note: '我们只想要原来的毛发纪念瓶' }, '主人拒绝替代');
+  await login('cs1');
+  await api('POST', `/api/mementos/${hair.id}/propose-case`, {
+    option: 'refund', fee_delta: -180, risk_notice: RISK,
+    option_note: '尊重家属意愿，全额退还毛发纪念瓶费用',
+  }, '客服重新提案退款');
+  await login('sup1');
+  detail = await api('GET', `/api/appointments/${id}`, {});
+  hc = detail.memento_cases.find((c: any) => c.option === 'refund');
+  await api('POST', `/api/memento-cases/${hc.id}/review`,
+    { approve: true, note: '材料确已不足，同意退款' }, '主管复核退款');
+  await login('owner1');
+  detail = await api('GET', `/api/appointments/${id}`, {});
+  conf = detail.confirmations.find((c: any) => c.subject === 'memento_case' && c.status === 'pending');
+  await api('POST', `/api/appointments/${id}/confirmations/${conf.id}/respond`,
+    { approve: true, note: '同意退款' }, '主人确认退款');
+  await login('fin1');
+  detail = await api('GET', `/api/appointments/${id}`, {});
+  hc = detail.memento_cases.find((c: any) => c.option === 'refund');
+  await api('POST', `/api/appointments/${id}/refund`,
+    { amount: 180, reason: '毛发纪念瓶制作失败，主人确认退款方案', case_id: hc.id }, '财务退款');
+  await login('owner1');
+  await api('POST', `/api/memento-cases/${hc.id}/rate`,
+    { rating: 4, note: '虽然遗憾，但退款和沟通都很及时' }, '主人评价退款');
+
+  // —— 相册：失败 → 替代纪念品（琉璃画像挂饰，差价 +50）→ 主管复核 → 主人确认 → 新制作单排入档期 → 财务确认补收 → 评价
+  await login('art1');
+  await api('POST', `/api/mementos/${album.id}/start`, {});
+  await api('POST', `/api/mementos/${album.id}/fail`,
+    { reason: '素材冲印校色失败' }, '相册失败');
+  await login('cs1');
+  await api('POST', `/api/mementos/${album.id}/propose-case`, {
+    option: 'alternative', fee_delta: 50, alternative_name: '琉璃画像挂饰',
+    risk_notice: '替代纪念品使用电子照片制作，不再消耗原生物材料。',
+  }, '客服提案替代挂饰');
+  await login('sup1');
+  detail = await api('GET', `/api/appointments/${id}`, {});
+  const ac = detail.memento_cases.find((c: any) => c.option === 'alternative' && c.alternative_name.includes('琉璃'));
+  await api('POST', `/api/memento-cases/${ac.id}/review`, { approve: true, note: '同意替代方案' });
+  await login('owner1');
+  detail = await api('GET', `/api/appointments/${id}`, {});
+  conf = detail.confirmations.find((c: any) => c.subject === 'memento_case' && c.status === 'pending');
+  await api('POST', `/api/appointments/${id}/confirmations/${conf.id}/respond`,
+    { approve: true, note: '挂饰也很好，同意' }, '主人确认替代');
+  const altMemento: any = (await api('GET', `/api/appointments/${id}`, {})).mementos
+    .find((m: any) => m.name.includes('琉璃画像挂饰'));
+  log(`替代纪念品已排入制作档期：#${altMemento.id} ${altMemento.name}，承诺 ${new Date(altMemento.due_at).toLocaleString('zh-CN')}`);
+  await login('art1');
+  await api('POST', `/api/mementos/${altMemento.id}/start`, {});
+  await api('POST', `/api/mementos/${altMemento.id}/done`, { media: [] }, '替代纪念品完成');
+  await login('fin1');
+  detail = await api('GET', `/api/appointments/${id}`, {});
+  await api('POST', `/api/memento-cases/${ac.id}/finance-confirm`,
+    { note: '替代纪念品差价 50 元已并入应收' }, '财务确认补收');
+  await login('owner1');
+  await api('POST', `/api/memento-cases/${ac.id}/rate`,
+    { rating: 5, note: '挂饰很精致' }, '主人评价替代');
+  log('三类失败处理全部闭环：重做（占用剩余材料）/ 退款（财务执行）/ 替代纪念品（新排期+补收）');
 
   // 15. 客服完成纪念品失败关怀回访
   await login('cs1');
@@ -155,7 +278,7 @@ async function main() {
     .find(f => f.trigger === 'memento_failed');
   await api('POST', `/api/followups/${care.id}/complete`, {
     emotion_note: '起初难过，得知重做并加急后情绪平复',
-    content: '已致歉并说明重做方案，赠送一张周年纪念照',
+    content: '已致歉并说明重做/退款/替代方案与不可逆风险，家属确认处理方式',
   });
 
   // 16. 骨灰盒寄送 → 破损 → 补发 → 签收
@@ -170,13 +293,18 @@ async function main() {
   await api('POST', `/api/shipments/${ship.id}/delivered`, {});
   await api('POST', `/api/shipments/${ship.id}/claim`, {});
 
-  // 17. 财务收款（按最终金额一次收清）
+  // 17. 财务收尾：预付款后经历退款 180 / 替代补收 50，按未结清余额多退少补
   await login('fin1');
   const d5: any = await api('GET', `/api/appointments/${id}`, {});
-  const payable = d5.fee_summary.payable;
-  await api('POST', `/api/appointments/${id}/payment`,
-    { amount: payable, method: 'wechat', note: '方案+体重补差，已结清' }, '财务收款');
-  log(`财务收款 ${payable} 元（报价 ${d5.fee_summary.quote_total} + 确认变更 ${d5.fee_summary.confirmed_change}）`);
+  const balance = Number(d5.fee_summary.balance.toFixed(2));
+  if (balance > 0) {
+    await api('POST', `/api/appointments/${id}/payment`,
+      { amount: balance, method: 'wechat', note: '替代纪念品差价补收尾款' }, '财务收尾补收');
+  } else if (balance < 0) {
+    await api('POST', `/api/appointments/${id}/refund`,
+      { amount: -balance, reason: '失败处理后尾款退回' }, '财务尾款退回');
+  }
+  log(`财务收尾：报价 ${d5.fee_summary.quote_total} + 变更 ${d5.fee_summary.confirmed_change}，已收 ${d5.fee_summary.paid} / 退 ${d5.fee_summary.refunded}，结清余额 0`);
 
   // 18. 客服完结归档
   await login('cs1');

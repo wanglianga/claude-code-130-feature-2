@@ -9,7 +9,7 @@ import { Hospital, Store, User } from '../src/entities/core';
 import {
   ColdStorage, FarewellRoomSlot, FurnaceSlot,
 } from '../src/entities/ops';
-import { Locker } from '../src/entities/aftercare';
+import { Locker, MementoFailureCase } from '../src/entities/aftercare';
 import { Message, Payment } from '../src/entities/billing';
 import { hashPassword } from '../src/auth/auth.service';
 
@@ -29,6 +29,7 @@ export const ds = new DataSource({
     require('../src/entities/ops').CremationCertificate,
     Locker,
     require('../src/entities/aftercare').Memento,
+    MementoFailureCase,
     require('../src/entities/aftercare').Shipment,
     require('../src/entities/aftercare').Followup,
     require('../src/entities/aftercare').AlbumMedia,
@@ -42,7 +43,7 @@ async function main() {
   await ds.initialize();
   await ds.query('SET FOREIGN_KEY_CHECKS=0');
   for (const t of ['messages', 'payments', 'album_media', 'followups', 'shipments', 'lockers',
-    'mementos', 'cremation_certificates', 'cold_storage', 'farewell_room_slots', 'furnace_slots',
+    'memento_failure_cases', 'mementos', 'cremation_certificates', 'cold_storage', 'farewell_room_slots', 'furnace_slots',
     'confirmations', 'fee_items', 'timeline_events', 'appointments', 'hospitals', 'users', 'stores']) {
     await ds.query(`TRUNCATE TABLE \`${t}\``).catch(() => {});
   }
@@ -70,6 +71,8 @@ async function main() {
     hp({ username: 'fire1', name: '火化师-郑师傅', role: 'cremator', store_id: 1, phone: '13900050001' }),
     hp({ username: 'fire2', name: '火化师-高师傅', role: 'cremator', store_id: 2, phone: '13900050002' }),
     hp({ username: 'art1', name: '纪念品师-阿岚', role: 'artisan', store_id: 1, phone: '13900060001' }),
+    hp({ username: 'art2', name: '纪念品师-阿槿', role: 'artisan', store_id: 2, phone: '13900060002' }),
+    hp({ username: 'sup1', name: '制作主管-苏晴', role: 'production_supervisor', store_id: 1, phone: '13900060003' }),
     hp({ username: 'fin1', name: '财务-唐会计', role: 'finance', store_id: 1, phone: '13900070001' }),
     hp({ username: 'manager1', name: '运营总监-林总', role: 'manager', phone: '13900080001' }),
   ]);
@@ -108,7 +111,7 @@ async function main() {
   // 火化炉作为目录存在（排期记录在 furnace_slots）
   console.log('种子完成：');
   console.log(`门店 ${stores.length} 家，账号 ${users.length} 个（密码均为 123456）`);
-  console.log('主要账号：owner1 / cs1 / driver1 / rite1 / fire1 / art1 / fin1 / manager1');
+  console.log('主要账号：owner1 / cs1 / driver1 / rite1 / fire1 / art1 / sup1 / fin1 / manager1');
   await ds.destroy();
 }
 

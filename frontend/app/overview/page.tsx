@@ -20,6 +20,8 @@ export default function OverviewPage() {
         <div className="stat"><div className="n" style={{ color: 'var(--ok)' }}>¥{Number(d.paid_total).toFixed(0)}</div><div className="l">已收净额（扣退款）</div></div>
         <div className="stat"><div className="n" style={{ color: d.expiring_lockers ? 'var(--warn)' : undefined }}>{d.expiring_lockers}</div><div className="l">柜位临期/过期</div></div>
         <div className="stat"><div className="n" style={{ color: d.failed_mementos ? 'var(--bad)' : undefined }}>{d.failed_mementos}</div><div className="l">纪念品失败/重做中</div></div>
+        <div className="stat"><div className="n" style={{ color: d.memento_cases_pending_review ? 'var(--warn)' : undefined }}>{d.memento_cases_pending_review}</div><div className="l">失败方案待主管复核</div></div>
+        <div className="stat"><div className="n" style={{ color: d.memento_cases_pending_owner ? 'var(--warn)' : undefined }}>{d.memento_cases_pending_owner}</div><div className="l">失败方案待主人确认/协商</div></div>
         <div className="stat"><div className="n" style={{ color: d.pending_fees ? 'var(--warn)' : undefined }}>{d.pending_fees}</div><div className="l">待家属确认费用变更</div></div>
         <div className="stat"><div className="n" style={{ color: d.breached_promises.length ? 'var(--bad)' : undefined }}>{d.breached_promises.length}</div><div className="l">承诺时间疑似超期</div></div>
       </div>
